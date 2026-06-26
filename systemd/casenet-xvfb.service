@@ -1,0 +1,14 @@
+[Unit]
+Description=Xvfb virtual display for casenet-monitor (headful browser, no physical screen)
+After=network.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+# :99 must match DISPLAY in .env. 1920x1080x24 = a normal desktop resolution.
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -ac -nolisten tcp
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

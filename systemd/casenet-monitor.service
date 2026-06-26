@@ -1,0 +1,24 @@
+[Unit]
+Description=CaseNet docket monitor (headful Chromium under Xvfb, VPN-guarded)
+After=network-online.target casenet-xvfb.service
+Wants=network-online.target
+Requires=casenet-xvfb.service
+# Cap restart thrash if it's crash-looping (e.g. VPN persistently down).
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__APP_DIR__
+# Config + secrets + recipient lists are loaded from .env by dotenv (WorkingDirectory).
+# DISPLAY must match casenet-xvfb.service and .env.
+Environment=DISPLAY=:99
+ExecStart=/usr/bin/node --import tsx src/monitor.ts
+Restart=always
+RestartSec=10
+StandardOutput=append:__APP_DIR__/monitor.log
+StandardError=append:__APP_DIR__/monitor.log
+
+[Install]
+WantedBy=multi-user.target

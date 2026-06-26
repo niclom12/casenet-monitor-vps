@@ -1,0 +1,24 @@
+{
+  "name": "casenet-monitor-vps",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Headless-VPS docket monitor for Missouri CaseNet (or any Cloudflare-fronted court docket): polls on an interval via a real headful browser under Xvfb, behind a country-locked VPN, and emails + ntfy-pushes on new docket entries.",
+  "scripts": {
+    "start": "tsx src/monitor.ts",
+    "once": "tsx src/monitor.ts --once",
+    "test-send": "node --import tsx scripts/test-send.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "nodemailer": "^6.9.14",
+    "playwright-core": "^1.47.0",
+    "undici": "^6.19.8"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
