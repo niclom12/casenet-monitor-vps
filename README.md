@@ -88,7 +88,8 @@ npm run once && cat last-docket.txt   # then forward, or use a snapshot in snaps
 | Restart after editing `.env` | `sudo systemctl restart casenet-monitor` |
 | Stop (don't `kill` — it respawns) | `sudo systemctl stop casenet-monitor` |
 | Switch VPN server | drop a new `.conf`, re-run `scripts/setup-vpn.sh` |
-| Change cadence | edit `INTERVAL_MS` in `.env`, restart |
+| Change cadence | edit `INTERVAL_MS` in `.env` (15 min since 19 Oct 2026), restart |
+| Change court hours | `ACTIVE_TZ` / `ACTIVE_DAYS` / `ACTIVE_HOURS` (default 08:00-17:00 Central, Mon-Fri); the supervisor stops everything outside them |
 
 ## Repo layout
 ```

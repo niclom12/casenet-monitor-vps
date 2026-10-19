@@ -29,6 +29,13 @@ a near-empty render counts as not read.
   STALE    a docket has not been genuinely read within STALE_MINUTES
   INVALID  the saved docket does not look like a docket
   OK       every docket read recently and looks real
+  OFF      outside court hours, when the supervisor stops the monitors on purpose
+
+Court hours (ACTIVE_TZ / ACTIVE_DAYS / ACTIVE_HOURS, same defaults as the
+supervisor): outside them nothing is checked and nobody is emailed. Inside them a
+docket's age runs from the later of its last read and that day's opening, so the
+first check of a Monday does not see Friday's file as 64 hours stale, and a monitor
+that never comes back up still alerts STALE_MINUTES into the window.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import alertjson
 
@@ -190,7 +198,25 @@ def parse_dockets(spec):
     return out
 
 
-def check_docket(path, now, stale_s, min_filed):
+def window_open_ts(conf, now):
+    """Epoch seconds the current court-hours window opened, or None when closed.
+
+    Same rule as the supervisor's in_active_window: ISO weekdays ACTIVE_DAYS,
+    local time ACTIVE_HOURS (HHMM-HHMM, end exclusive) in ACTIVE_TZ."""
+    tz = ZoneInfo(cfg(conf, "ACTIVE_TZ", "America/Chicago"))
+    d0, d1 = (int(x) for x in cfg(conf, "ACTIVE_DAYS", "1-5").split("-"))
+    h0, h1 = cfg(conf, "ACTIVE_HOURS", "0800-1700").split("-")
+    local = datetime.fromtimestamp(now, tz)
+    if not d0 <= local.isoweekday() <= d1:
+        return None
+    opens = local.replace(hour=int(h0[:2]), minute=int(h0[2:]), second=0, microsecond=0)
+    closes = local.replace(hour=int(h1[:2]), minute=int(h1[2:]), second=0, microsecond=0)
+    if not opens <= local < closes:
+        return None
+    return opens.timestamp()
+
+
+def check_docket(path, now, stale_s, min_filed, since=None):
     """(kind, detail, age_minutes_or_None), kind one of "ok", "stale", "invalid".
 
     Never raises: a check that throws is a check that stops watching."""
@@ -198,7 +224,7 @@ def check_docket(path, now, stale_s, min_filed):
         mtime = os.stat(path).st_mtime
     except OSError:
         return "invalid", "no saved docket file", None
-    age_m = (now - mtime) / 60.0
+    age_m = (now - max(mtime, since or 0)) / 60.0
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             text = fh.read()
@@ -223,10 +249,13 @@ def evaluate(conf, now):
     base = cfg(conf, "CASENET_DIR", "/home/casenet/casenet-monitor")
     stale_s = cfg_int(conf, "STALE_MINUTES", 90) * 60
     min_filed = cfg_int(conf, "MIN_FILED_BY", 20)
+    opened = window_open_ts(conf, now)
+    if opened is None:
+        return "OFF", []
     results, kinds = [], []
     for label, fname in parse_dockets(cfg(conf, "DOCKETS", "")):
         path = fname if os.path.isabs(fname) else os.path.join(base, fname)
-        kind, detail, age_m = check_docket(path, now, stale_s, min_filed)
+        kind, detail, age_m = check_docket(path, now, stale_s, min_filed, since=opened)
         results.append((label, kind == "ok", detail, age_m))
         kinds.append(kind)
     if not results:
@@ -271,6 +300,11 @@ def run(conf, now=None, mailer=None):
     mail = mailer or (lambda subj, body, alert=None: send_mail(conf, to, subj, body, alert))
 
     state, results = evaluate(conf, now)
+    if state == "OFF":
+        # The monitors are stopped on purpose. Leave the state alone: an alert
+        # raised before the close stays open until a read in the next window.
+        log("outside court hours: not checked")
+        return 0
     for label, ok, detail, _ in results:
         log(f"{'OK ' if ok else 'BAD'} {label}: {detail}")
     st = read_state(state_path)

@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import nodemailer from 'nodemailer';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -249,15 +249,24 @@ async function loadState(): Promise<State> {
   if (!existsSync(STATE_FILE)) return {};
   return JSON.parse(await readFile(STATE_FILE, 'utf8')) as State;
 }
+// The supervisor stops every monitor outside court hours, so a monitor can be
+// killed at any moment. Write to a temp file and rename over the old one: a kill
+// mid-write leaves the previous file whole, never a truncated one that fails to
+// parse (or, worse, an empty knownEntries that re-baselines silently).
+async function writeAtomic(path: string, text: string): Promise<void> {
+  const tmp = `${path}.tmp-${process.pid}`;
+  await writeFile(tmp, text);
+  await rename(tmp, path);
+}
 async function saveState(s: State): Promise<void> {
-  await writeFile(STATE_FILE, JSON.stringify(s, null, 2));
+  await writeAtomic(STATE_FILE, JSON.stringify(s, null, 2));
 }
 async function loadLastDocket(): Promise<string> {
   if (!existsSync(DOCKET_FILE)) return '';
   return readFile(DOCKET_FILE, 'utf8');
 }
 async function saveLastDocket(text: string): Promise<void> {
-  await writeFile(DOCKET_FILE, text);
+  await writeAtomic(DOCKET_FILE, text);
 }
 
 // ------------------------------------------------ self-healing browser ------

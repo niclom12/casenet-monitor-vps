@@ -38,6 +38,11 @@ class Base(unittest.TestCase):
             "WATCHDOG_REPEAT_HOURS": "6",
             "WATCHDOG_STATE_FILE": os.path.join(self.dir, "state.json"),
             "ALERT_TO": "nic@atab.ai",
+            # A window that is open at NOW and for the next 9 hours, so these
+            # tests are about staleness alone. CourtHours below tests the window.
+            "ACTIVE_TZ": "Etc/GMT-12",
+            "ACTIVE_DAYS": "1-7",
+            "ACTIVE_HOURS": "0000-2359",
         }
 
     def tearDown(self):
@@ -202,3 +207,64 @@ class Recipients(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CourtHours(Base):
+    """The supervisor stops the monitors outside 08:00-17:00 Central on weekdays."""
+
+    # Mon 19 Oct 2026, Central Daylight Time (UTC-5).
+    MON_0700 = 1_792_411_200   # 07:00 CDT, before the window
+    MON_0800 = MON_0700 + 3600
+
+    def setUp(self):
+        super().setUp()
+        for k in ("ACTIVE_TZ", "ACTIVE_DAYS", "ACTIVE_HOURS"):
+            del self.conf[k]          # the real defaults
+
+    def put_at(self, name, ts):
+        p = os.path.join(self.dir, name)
+        with open(p, "w") as fh:
+            fh.write(real_docket())
+        os.utime(p, (ts, ts))
+
+    def friday_files(self):
+        fri_1650 = self.MON_0700 - (2 * 24 + 14) * 3600 - 10 * 60   # Fri 16:50 CDT
+        self.put_at("main.txt", fri_1650)
+        self.put_at("d01.txt", fri_1650)
+
+    def test_window_bounds(self):
+        self.assertIsNone(w.window_open_ts(self.conf, self.MON_0700))
+        self.assertEqual(w.window_open_ts(self.conf, self.MON_0800), self.MON_0800)
+        self.assertEqual(w.window_open_ts(self.conf, self.MON_0800 + 8 * 3600 + 3599), self.MON_0800)
+        self.assertIsNone(w.window_open_ts(self.conf, self.MON_0800 + 9 * 3600))      # 17:00
+        self.assertIsNone(w.window_open_ts(self.conf, self.MON_0800 - 2 * 86400))     # Saturday
+
+    def test_weekend_and_night_are_off_and_send_nothing(self):
+        self.friday_files()
+        for now in (self.MON_0700, self.MON_0700 - 86400, self.MON_0800 + 10 * 3600):
+            self.assertEqual(w.evaluate(self.conf, now)[0], "OFF")
+            self.assertEqual(self.run_once(now), 0)
+        self.assertEqual(self.sent, [])
+
+    def test_monday_open_does_not_count_the_weekend(self):
+        self.friday_files()
+        state, results = w.evaluate(self.conf, self.MON_0800 + 20 * 60)
+        self.assertEqual(state, "OK", results)
+
+    def test_monitor_that_never_restarts_alerts_within_the_window(self):
+        self.friday_files()
+        later = self.MON_0800 + 100 * 60                # 90-min limit passed
+        self.assertEqual(w.evaluate(self.conf, later)[0], "STALE")
+        self.run_once(later)
+        self.run_once(later + 600)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_off_hours_keep_an_open_alert_open(self):
+        self.friday_files()
+        later = self.MON_0800 + 100 * 60
+        self.run_once(later)
+        self.run_once(later + 600)                      # alerted
+        self.run_once(self.MON_0800 + 10 * 3600)        # 18:00, off
+        st = w.read_state(self.conf["WATCHDOG_STATE_FILE"])
+        self.assertTrue(st.get("alerted"))
+        self.assertEqual(len(self.sent), 1)
