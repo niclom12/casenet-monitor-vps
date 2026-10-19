@@ -640,8 +640,8 @@ function summaryReason(total: number, knownCount: number): string {
   return `(Genuine batch, not a re-baseline: ${knownCount} entries were already on record. The court published these together. Summary sent instead of ${total} individual alerts.)`;
 }
 
-/** Alert on each new/updated entry individually (one email + one push per entry),
- *  unless the count is implausibly high, in which case send a single summary. */
+/** One email + one push per check: a single entry in the usual format, several
+ *  entries listed in one message, and an implausibly large count as a summary. */
 async function alertEntries(fresh: Entry[], updated: Entry[], snapshotPath: string, knownCount: number): Promise<void> {
   const total = fresh.length + updated.length;
   const detectedAt = new Date().toISOString();
@@ -684,6 +684,45 @@ async function alertEntries(fresh: Entry[], updated: Entry[], snapshotPath: stri
     ...fresh.map((e) => ({ kind: 'NEW' as const, e })),
     ...updated.map((e) => ({ kind: 'UPDATED' as const, e })),
   ];
+  // One email and one push per case per check (Nic, 19 Oct 2026). A clerk who
+  // posts a weekend's filings at Monday's opening produced 10 separate emails
+  // and 10 pushes on 20SL-CC03676 in one morning; the reader wants one message
+  // listing everything that landed, in full.
+  if (items.length > 1) {
+    const subject = fresh.length && updated.length
+      ? `${fresh.length} new, ${updated.length} updated docket entries`
+      : `${items.length} ${fresh.length ? 'new' : 'updated'} docket entries`;
+    const body = [
+      ...caseHeader(),
+      `${subject}:`,
+      ``,
+      ...items.flatMap(({ kind, e }, i) => [
+        `${i + 1}. ${kind === 'NEW' ? 'New' : 'Updated'}, dated ${e.date}:`,
+        `   ${e.text}`,
+        ``,
+      ]),
+      `Docket: ${TARGET_URL}`,
+      `Detected: ${detectedAt}`,
+    ].join('\n');
+    try {
+      await getTransporter().sendMail({
+        from,
+        to,
+        subject: `${CASE_NAME}: ${subject} (${COURT_NAME}, ${CASE_LABEL})`,
+        text: body,
+      });
+      console.log(`[alert] combined email sent (${items.map((x) => x.e.id).join(',')} -> ${to})`);
+    } catch (err) {
+      console.error('[alert] email failed:', err instanceof Error ? err.message : err);
+    }
+    const lines = items.map(({ e }) => `${e.date} ${e.text.length > 160 ? e.text.slice(0, 160) + '…' : e.text}`);
+    await notify(`${subject}: ${CASE_LABEL}`, lines.join('\n').slice(0, 1200), {
+      priority: 'high',
+      tags: 'rotating_light,page_facing_up',
+      click: TARGET_URL,
+    });
+    return;
+  }
   for (const { kind, e } of items) {
     const label = kind === 'NEW' ? 'New docket entry' : 'Updated docket entry';
     const body = [
