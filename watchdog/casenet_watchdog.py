@@ -26,16 +26,19 @@ Same two rules as wa-watchdog, for the same reasons:
 Content is checked as well as age, so a saved file that somehow held a block page or
 a near-empty render counts as not read.
 
-  STALE    a docket has not been genuinely read within STALE_MINUTES
+  STALE    a docket has not been genuinely read within its limit
   INVALID  the saved docket does not look like a docket
   OK       every docket read recently and looks real
-  OFF      outside court hours, when the supervisor stops the monitors on purpose
 
-Court hours (ACTIVE_TZ / ACTIVE_DAYS / ACTIVE_HOURS, same defaults as the
-supervisor): outside them nothing is checked and nobody is emailed. Inside them a
-docket's age runs from the later of its last read and that day's opening, so the
-first check of a Monday does not see Friday's file as 64 hours stale, and a monitor
-that never comes back up still alerts STALE_MINUTES into the window.
+The monitors run all day, every day (Nic, 30 Oct 2026): fast inside the trading
+window (ACTIVE_TZ / ACTIVE_DAYS / ACTIVE_HOURS, the monitor's defaults: 08:00-17:00
+Central, Monday to Friday) and slow outside it. So this checks all day too, with
+STALE_MINUTES inside the window and STALE_MINUTES_OFF_HOURS outside it.
+
+No throttle. Every check that finds a docket not being read sends one email listing
+every docket in that state, for as long as it lasts. The old box-wide six-hour
+throttle hid the Aretino docket going unread on 29 Oct 2026, the evening the trial
+verdict landed, because King v. Monsanto had alerted an hour earlier.
 """
 from __future__ import annotations
 
@@ -247,15 +250,15 @@ def evaluate(conf, now):
     INVALID outranks STALE: content that is not a docket is the worse finding,
     because a stale docket is at least a real one."""
     base = cfg(conf, "CASENET_DIR", "/home/casenet/casenet-monitor")
-    stale_s = cfg_int(conf, "STALE_MINUTES", 90) * 60
+    if window_open_ts(conf, now) is not None:
+        stale_s = cfg_int(conf, "STALE_MINUTES", 75) * 60
+    else:
+        stale_s = cfg_int(conf, "STALE_MINUTES_OFF_HOURS", 150) * 60
     min_filed = cfg_int(conf, "MIN_FILED_BY", 20)
-    opened = window_open_ts(conf, now)
-    if opened is None:
-        return "OFF", []
     results, kinds = [], []
     for label, fname in parse_dockets(cfg(conf, "DOCKETS", "")):
         path = fname if os.path.isabs(fname) else os.path.join(base, fname)
-        kind, detail, age_m = check_docket(path, now, stale_s, min_filed, since=opened)
+        kind, detail, age_m = check_docket(path, now, stale_s, min_filed)
         results.append((label, kind == "ok", detail, age_m))
         kinds.append(kind)
     if not results:
@@ -268,7 +271,7 @@ def evaluate(conf, now):
 def alert_body(state, results, consecutive, conf):
     now = datetime.now(SAST).strftime("%Y-%m-%d %H:%M SAST")
     base = cfg(conf, "CASENET_DIR", "/home/casenet/casenet-monitor")
-    lines = [f"The Case.net monitor is not reading the King v. Monsanto docket ({state}).", "",
+    lines = [f"The Case.net monitor is not reading every docket ({state}).", "",
              f"  checked   {now}", f"  failed    {consecutive} consecutive watchdog checks", ""]
     for label, ok, detail, _ in results:
         lines.append(f"  {'ok  ' if ok else 'BAD '} {label:<18} {detail}")
@@ -286,7 +289,7 @@ def alert_body(state, results, consecutive, conf):
         "       pgrep -af 'monitor[.]ts'",
         f"       tail {base}/supervisor.log",
         "",
-        "Sent by casenet-watchdog on lacuna-monitor.",
+        "Sent by casenet-watchdog on lacuna-ops.",
     ]
     return "\n".join(lines)
 
@@ -294,17 +297,11 @@ def alert_body(state, results, consecutive, conf):
 def run(conf, now=None, mailer=None):
     now = int(now if now is not None else time.time())
     threshold = cfg_int(conf, "WATCHDOG_FAIL_THRESHOLD", 2)
-    throttle_h = cfg_int(conf, "WATCHDOG_REPEAT_HOURS", 6)
     state_path = cfg(conf, "WATCHDOG_STATE_FILE", os.path.join(HERE, "state.json"))
     to = cfg_list(conf, "ALERT_TO", "nic@atab.ai")
     mail = mailer or (lambda subj, body, alert=None: send_mail(conf, to, subj, body, alert))
 
     state, results = evaluate(conf, now)
-    if state == "OFF":
-        # The monitors are stopped on purpose. Leave the state alone: an alert
-        # raised before the close stays open until a read in the next window.
-        log("outside court hours: not checked")
-        return 0
     for label, ok, detail, _ in results:
         log(f"{'OK ' if ok else 'BAD'} {label}: {detail}")
     st = read_state(state_path)
@@ -315,9 +312,9 @@ def run(conf, now=None, mailer=None):
         # One recovery email, and only if a problem was actually reported.
         if was != "OK" and st.get("alerted"):
             mail("Case.net monitor: RECOVERED",
-                 "The Case.net monitor is genuinely reading the King v. Monsanto docket again.\n\n"
+                 "The Case.net monitor is genuinely reading every docket again.\n\n"
                  + "\n".join(f"  {l:<18} {d}" for l, _, d, _ in results)
-                 + "\n\nSent by casenet-watchdog on lacuna-monitor.",
+                 + "\n\nSent by casenet-watchdog on lacuna-ops.",
                  {"source": "casenet", "klass": "ops", "kind": "monitor_recovered",
                   "headline": "The Case.net monitor is reading the docket again",
                   "ts": now, "tier": "immediate", "entity": "King v. Monsanto",
@@ -333,12 +330,6 @@ def run(conf, now=None, mailer=None):
     # One bad check can be a file mid-write; two in a row is real.
     if consecutive < threshold:
         log(f"below threshold ({consecutive}/{threshold}), not alerting yet")
-        write_state(state_path, st)
-        return 1
-
-    since_last = now - int(st.get("last_alert", 0) or 0)
-    if st.get("alerted") and since_last < throttle_h * 3600:
-        log(f"already alerted {since_last // 60}m ago, throttled")
         write_state(state_path, st)
         return 1
 

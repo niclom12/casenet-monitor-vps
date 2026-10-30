@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { Agent, setGlobalDispatcher } from 'undici';
+import { inWindow, nextDelayMs, parseWindow } from './schedule.js';
 
 // Force IPv4 for all fetch() calls. Through a VPN tunnel, undici's default
 // happy-eyeballs tries the IPv6 address first and can stall (ntfy + the country
@@ -49,12 +50,16 @@ const CDP_PORT = env('CDP_PORT', '9222');
 
 const INTERVAL_MS = Number(env('INTERVAL_MS', '1800000'));
 const JITTER_PCT = Math.max(0, Math.min(100, Number(env('JITTER_PCT', '25'))));
-// Slower overnight. Between 18 and 21 Sep 2026 a third of the checks made between
-// 00:00 and 07:00 UTC (US evening/night) failed on Cloudflare challenges or slow
-// docket AJAX, against a tenth during the US day. Fewer visits in that window
-// means fewer challenges and fewer failure emails; the court is not filing then.
-const NIGHT_INTERVAL_MS = Number(env('NIGHT_INTERVAL_MS', String(INTERVAL_MS)));
-const NIGHT_UTC_HOURS = env('NIGHT_UTC_HOURS', '0-7'); // "start-end", end exclusive
+// Always on (Nic, 30 Oct 2026): INTERVAL_MS inside the trading window, SLOW_INTERVAL_MS
+// outside it, every day. NIGHT_INTERVAL_MS is the old name and still read.
+const SLOW_INTERVAL_MS = Number(
+  env('SLOW_INTERVAL_MS', process.env.NIGHT_INTERVAL_MS ?? '3600000'),
+);
+const FAST_WINDOW = parseWindow(
+  env('ACTIVE_TZ', 'America/Chicago'),
+  env('ACTIVE_DAYS', '1-5'),
+  env('ACTIVE_HOURS', '0800-1700'),
+);
 // One retry inside a check. Every failure seen so far cleared on the next visit,
 // so a reload after a short pause turns a 30-minute gap into a one-minute one.
 const CHECK_RETRIES = Number(env('CHECK_RETRIES', '1'));
@@ -105,10 +110,6 @@ const FAIL_REALERT_HOURS = Number(env('FAIL_REALERT_HOURS', '12'));
 const START_DELAY_MS = Number(env('START_DELAY_MS', '0'));
 
 const ONCE = process.argv.includes('--once');
-// One hour, not four. Case.net's 403 is rate limiting that clears in about a
-// minute, so the old ceiling punished a transient refusal with a whole day of
-// silence on a docket that is checked every thirty minutes.
-const MAX_BACKOFF_MS = 60 * 60 * 1000;
 let consecutiveFailures = 0;
 
 /** Raise the failure count and write it through, so a restart cannot lose it. */
@@ -965,31 +966,16 @@ async function tick(): Promise<void> {
 }
 
 function nextDelay(): number {
+  const fast = inWindow(FAST_WINDOW);
   if (consecutiveFailures > 0) {
-    const backoff = Math.min(MAX_BACKOFF_MS, INTERVAL_MS * Math.pow(2, consecutiveFailures - 1));
-    console.log(`[backoff] ${consecutiveFailures} failures, waiting ${Math.round(backoff / 1000)}s`);
-    return backoff;
+    console.log(`[retry] ${consecutiveFailures} failure(s); next check at the normal ${fast ? 'fast' : 'slow'} cadence`);
   }
-  const base = isNightUtc() ? NIGHT_INTERVAL_MS : INTERVAL_MS;
-  if (JITTER_PCT === 0) return base;
-  const span = base * (JITTER_PCT / 100);
-  const offset = (Math.random() * 2 - 1) * span;
-  return Math.max(60_000, Math.round(base + offset));
-}
-
-/** True when the current UTC hour falls inside NIGHT_UTC_HOURS ("0-7" = 00:00 to 06:59). */
-function isNightUtc(now: Date = new Date()): boolean {
-  const m = NIGHT_UTC_HOURS.match(/^(\d{1,2})-(\d{1,2})$/);
-  if (!m) return false;
-  const start = Number(m[1]);
-  const end = Number(m[2]);
-  const h = now.getUTCHours();
-  return start <= end ? h >= start && h < end : h >= start || h < end;
+  return nextDelayMs({ fast, fastMs: INTERVAL_MS, slowMs: SLOW_INTERVAL_MS, jitterPct: JITTER_PCT });
 }
 
 async function main(): Promise<void> {
   console.log(
-    `[start] case=${CASE_LABEL}  interval=${Math.round(INTERVAL_MS / 1000)}s  night(${NIGHT_UTC_HOURS}Z)=${Math.round(NIGHT_INTERVAL_MS / 1000)}s  jitter=±${JITTER_PCT}%  retries=${CHECK_RETRIES}`,
+    `[start] case=${CASE_LABEL}  interval=${Math.round(INTERVAL_MS / 1000)}s  slow=${Math.round(SLOW_INTERVAL_MS / 1000)}s outside ${process.env.ACTIVE_DAYS ?? '1-5'} ${process.env.ACTIVE_HOURS ?? '0800-1700'} ${FAST_WINDOW.tz}  jitter=±${JITTER_PCT}%  retries=${CHECK_RETRIES}`,
   );
   consecutiveFailures = (await loadState()).consecutiveFailures ?? 0;
   if (consecutiveFailures > 0) {

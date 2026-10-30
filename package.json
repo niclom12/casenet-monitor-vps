@@ -7,7 +7,8 @@
   "scripts": {
     "start": "tsx src/monitor.ts",
     "once": "tsx src/monitor.ts --once",
-    "test-send": "node --import tsx scripts/test-send.mjs"
+    "test-send": "node --import tsx scripts/test-send.mjs",
+    "test": "node --import tsx --test src/schedule.test.ts && cd watchdog && python3 -m unittest -q test_casenet_watchdog"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

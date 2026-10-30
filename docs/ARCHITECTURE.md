@@ -53,8 +53,8 @@ survives a monitor restart, and a monitor crash-loop never tears down the displa
 monitor `Requires=casenet-xvfb.service` so ordering/availability is enforced.
 
 ## Failure semantics
-- A check that can't reach the docket throws; `consecutiveFailures` increments with exponential
-  backoff (capped 4h).
+- A check that can't reach the docket throws; `consecutiveFailures` increments. The next check
+  still runs at the normal cadence (no backoff since 30 Oct 2026).
 - After `FAIL_ALERT_THRESHOLD` failures it emails `FAIL_ALERT_TO` once, re-mailing at most every
   `FAIL_REALERT_HOURS`. On the next success it emails "recovered" and resets.
 - The VPN guard converts "egress drifted off US" into a normal failure (pause + alert), so the

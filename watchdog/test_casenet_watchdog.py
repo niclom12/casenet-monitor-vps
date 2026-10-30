@@ -35,7 +35,6 @@ class Base(unittest.TestCase):
             "STALE_MINUTES": "90",
             "MIN_FILED_BY": "20",
             "WATCHDOG_FAIL_THRESHOLD": "2",
-            "WATCHDOG_REPEAT_HOURS": "6",
             "WATCHDOG_STATE_FILE": os.path.join(self.dir, "state.json"),
             "ALERT_TO": "nic@atab.ai",
             # A window that is open at NOW and for the next 9 hours, so these
@@ -152,18 +151,25 @@ class Alerting(Base):
         self.assertEqual(alert["source"], "casenet")
         self.assertEqual(alert["klass"], "ops")
 
-    def test_repeat_is_throttled(self):
+    def test_every_bad_check_after_the_first_alerts(self):
+        # No throttle: an hour of bad checks is five emails (the first check only
+        # confirms nothing is mid-write).
         self.stale()
-        for i in range(6):                     # an hour of checks
+        for i in range(6):
             self.run_once(NOW + i * 600)
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.sent), 5)
 
-    def test_realerts_after_throttle_window(self):
-        self.stale()
+    def test_a_second_docket_going_bad_is_reported_while_the_first_is_open(self):
+        # 29 Oct 2026: King had alerted, then Aretino went unread and the old
+        # box-wide throttle swallowed it.
+        self.put("main.txt", real_docket(), 200)
+        self.put("d01.txt", real_docket(), 10)
         self.run_once()
         self.run_once(NOW + 600)
-        self.run_once(NOW + 600 + 6 * 3600 + 60)
+        self.put("d01.txt", real_docket(), 200)
+        self.run_once(NOW + 1200)
         self.assertEqual(len(self.sent), 2)
+        self.assertIn("2622-CC00325-01", self.sent[-1][0])
 
     def test_recovery_emails_once_after_a_real_alert(self):
         self.stale()
@@ -209,8 +215,8 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class CourtHours(Base):
-    """The supervisor stops the monitors outside 08:00-17:00 Central on weekdays."""
+class TradingWindow(Base):
+    """Fast checks 08:00-17:00 Central on weekdays, slow ones the rest of the time."""
 
     # Mon 19 Oct 2026, Central Daylight Time (UTC-5).
     MON_0700 = 1_792_411_200   # 07:00 CDT, before the window
@@ -218,19 +224,16 @@ class CourtHours(Base):
 
     def setUp(self):
         super().setUp()
-        for k in ("ACTIVE_TZ", "ACTIVE_DAYS", "ACTIVE_HOURS"):
-            del self.conf[k]          # the real defaults
+        for k in ("ACTIVE_TZ", "ACTIVE_DAYS", "ACTIVE_HOURS", "STALE_MINUTES"):
+            del self.conf[k]          # the real defaults: 75 in, 150 out
 
-    def put_at(self, name, ts):
-        p = os.path.join(self.dir, name)
-        with open(p, "w") as fh:
-            fh.write(real_docket())
-        os.utime(p, (ts, ts))
-
-    def friday_files(self):
-        fri_1650 = self.MON_0700 - (2 * 24 + 14) * 3600 - 10 * 60   # Fri 16:50 CDT
-        self.put_at("main.txt", fri_1650)
-        self.put_at("d01.txt", fri_1650)
+    def both_read_minutes_before(self, now, minutes):
+        for name in ("main.txt", "d01.txt"):
+            p = os.path.join(self.dir, name)
+            with open(p, "w") as fh:
+                fh.write(real_docket())
+            t = now - minutes * 60
+            os.utime(p, (t, t))
 
     def test_window_bounds(self):
         self.assertIsNone(w.window_open_ts(self.conf, self.MON_0700))
@@ -239,32 +242,23 @@ class CourtHours(Base):
         self.assertIsNone(w.window_open_ts(self.conf, self.MON_0800 + 9 * 3600))      # 17:00
         self.assertIsNone(w.window_open_ts(self.conf, self.MON_0800 - 2 * 86400))     # Saturday
 
-    def test_weekend_and_night_are_off_and_send_nothing(self):
-        self.friday_files()
-        for now in (self.MON_0700, self.MON_0700 - 86400, self.MON_0800 + 10 * 3600):
-            self.assertEqual(w.evaluate(self.conf, now)[0], "OFF")
-            self.assertEqual(self.run_once(now), 0)
-        self.assertEqual(self.sent, [])
+    def test_off_hours_are_checked_with_the_longer_limit(self):
+        night = self.MON_0700
+        self.both_read_minutes_before(night, 100)
+        self.assertEqual(w.evaluate(self.conf, night)[0], "OK")
+        self.both_read_minutes_before(night, 160)
+        self.assertEqual(w.evaluate(self.conf, night)[0], "STALE")
 
-    def test_monday_open_does_not_count_the_weekend(self):
-        self.friday_files()
-        state, results = w.evaluate(self.conf, self.MON_0800 + 20 * 60)
-        self.assertEqual(state, "OK", results)
+    def test_weekend_silence_alerts(self):
+        saturday = self.MON_0800 - 2 * 86400
+        self.both_read_minutes_before(saturday, 24 * 60)
+        self.run_once(saturday)
+        self.run_once(saturday + 600)
+        self.assertEqual(len(self.sent), 1)
 
-    def test_monitor_that_never_restarts_alerts_within_the_window(self):
-        self.friday_files()
-        later = self.MON_0800 + 100 * 60                # 90-min limit passed
+    def test_inside_the_window_the_short_limit_applies(self):
+        later = self.MON_0800 + 3 * 3600
+        self.both_read_minutes_before(later, 80)
         self.assertEqual(w.evaluate(self.conf, later)[0], "STALE")
-        self.run_once(later)
-        self.run_once(later + 600)
-        self.assertEqual(len(self.sent), 1)
-
-    def test_off_hours_keep_an_open_alert_open(self):
-        self.friday_files()
-        later = self.MON_0800 + 100 * 60
-        self.run_once(later)
-        self.run_once(later + 600)                      # alerted
-        self.run_once(self.MON_0800 + 10 * 3600)        # 18:00, off
-        st = w.read_state(self.conf["WATCHDOG_STATE_FILE"])
-        self.assertTrue(st.get("alerted"))
-        self.assertEqual(len(self.sent), 1)
+        self.both_read_minutes_before(later, 60)
+        self.assertEqual(w.evaluate(self.conf, later)[0], "OK")

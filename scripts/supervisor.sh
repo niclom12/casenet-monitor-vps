@@ -46,13 +46,12 @@ fi
 exec 9>"$LOCKFILE"
 flock -n 9 || exit 0
 
-# 0) Court hours only. Case.net is checked while Missouri courts are open
-# (08:00-17:00 Central, Monday to Friday) and everything is stopped outside that:
-# the four monitors and Opera. Entries filed overnight are caught by the first
-# check of the next window, which alerts on them as one batch. Fewer visits also
-# mean fewer Cloudflare challenges. Nic's call, 19 Oct 2026. State holidays are
-# not excluded: the monitors run, find nothing new, and cost a few visits.
-# Override with ACTIVE_TZ / ACTIVE_DAYS / ACTIVE_HOURS in casenet-tools.env.
+# 0) Always on (Nic, 30 Oct 2026). The monitors and Opera run all day, every day.
+# The trading window (08:00-17:00 Central, Monday to Friday) only sets the cadence,
+# and the monitor reads it itself: INTERVAL_MS inside, SLOW_INTERVAL_MS outside.
+# From 19 to 29 Oct everything was stopped outside court hours; that left the
+# Aretino verdict on 29 Oct unread until the next morning.
+# `supervisor.sh --window-test <date>` prints in/out for a date.
 ACTIVE_TZ=${ACTIVE_TZ:-America/Chicago}
 ACTIVE_DAYS=${ACTIVE_DAYS:-1-5}      # ISO weekday range, 1 = Monday
 ACTIVE_HOURS=${ACTIVE_HOURS:-0800-1700}  # HHMM-HHMM, end exclusive
@@ -65,28 +64,8 @@ in_active_window(){
   [ "$now_dow" -ge "$d0" ] && [ "$now_dow" -le "$d1" ] || return 1
   [ $((10#$now_hm)) -ge $((10#$h0)) ] && [ $((10#$now_hm)) -lt $((10#$h1)) ]
 }
-# `supervisor.sh --window-test <date>` prints in/out for a date, for the tests.
 if [ "${1:-}" = "--window-test" ]; then
   in_active_window "$2" && echo in || echo out
-  exit 0
-fi
-if ! in_active_window; then
-  stopped=0
-  for pf in "$PIDFILE" "$PIDFILE2" "$PIDFILE3" "$PIDFILE4"; do
-    pid=$(cat "$pf" 2>/dev/null)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
-       && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'opera-supervised'; then
-      kill "$pid" 2>/dev/null && stopped=$((stopped + 1))
-    fi
-    rm -f "$pf"
-  done
-  if pgrep -f "user-data-dir=$OPERA_PROFILE" >/dev/null 2>&1; then
-    pkill -TERM -f "user-data-dir=$OPERA_PROFILE" 2>/dev/null
-    sleep 5
-    pkill -KILL -f "user-data-dir=$OPERA_PROFILE" 2>/dev/null
-    stopped=$((stopped + 1))
-  fi
-  [ "$stopped" -gt 0 ] && log "outside court hours ($ACTIVE_DAYS $ACTIVE_HOURS $ACTIVE_TZ): stopped $stopped process(es)"
   exit 0
 fi
 
