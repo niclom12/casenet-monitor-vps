@@ -340,8 +340,18 @@ def run(conf, now=None, mailer=None, client_mailer=None):
     # (Nic, 31 Oct 2026). No data-layer copy: Nic's stream already records it.
     client = cfg_list(conf, "CLIENT_ALERT_TO", "")
     client_threshold = cfg_int(conf, "CLIENT_FAIL_THRESHOLD", 3)
-    client_mail = client_mailer or (lambda subj, body: send_mail(
+    raw_client_mail = client_mailer or (lambda subj, body: send_mail(
         conf, client, subj, body, copy_data_layer=False))
+
+    def client_mail(subj, body):
+        # A failed client send must never stop Nic's alert or the state update.
+        # Not marking it sent means the next check tries again.
+        try:
+            raw_client_mail(subj, body)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log(f"WARN: client mail failed, will retry next check: {exc!r}")
+            return False
 
     state, results = evaluate(conf, now)
     for label, ok, detail, _ in results:
@@ -361,11 +371,13 @@ def run(conf, now=None, mailer=None, client_mailer=None):
                   "headline": "The Case.net monitor is reading the docket again",
                   "ts": now, "tier": "immediate", "entity": "King v. Monsanto",
                   "detail": {"state": "OK"}})
-        if client and st.get("client_bad"):
-            client_mail("Case.net monitor: reading every docket again",
-                        client_recovery_body(results, conf))
+        client_bad = st.get("client_bad") or []
+        if client and client_bad and client_mail(
+                "Case.net monitor: reading every docket again",
+                client_recovery_body(results, conf)):
+            client_bad = []
         st.update({"consecutive_bad": 0, "last_state": "OK", "alerted": False,
-                   "client_bad": []})
+                   "client_bad": client_bad})
         write_state(state_path, st)
         return 0
 
@@ -375,9 +387,9 @@ def run(conf, now=None, mailer=None, client_mailer=None):
 
     if client and consecutive >= client_threshold:
         told = list(st.get("client_bad") or [])
-        if any(l not in told for l in bad_labels):
-            client_mail(f"Case.net monitor: not reading {', '.join(bad_labels)}",
-                        client_alert_body(results, consecutive, conf))
+        if any(l not in told for l in bad_labels) and client_mail(
+                f"Case.net monitor: not reading {', '.join(bad_labels)}",
+                client_alert_body(results, consecutive, conf)):
             st["client_bad"] = told + [l for l in bad_labels if l not in told]
 
     # One bad check can be a file mid-write; two in a row is real.

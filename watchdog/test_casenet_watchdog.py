@@ -264,6 +264,23 @@ class ClientMail(Alerting):
         self.run_once(NOW + 1200)
         self.assertEqual(self.client_sent, [])
 
+    def test_a_failed_client_send_never_blocks_nics_alert_and_retries(self):
+        calls = []
+
+        def broken(subject, body):
+            calls.append(subject)
+            if len(calls) == 1:
+                raise OSError("smtp down")
+            self.client_sent.append((subject, body))
+
+        self.client_mailer = broken
+        self.stale()
+        for i in range(4):
+            self.run_once(NOW + i * 600)
+        self.assertEqual(len(self.sent), 3)        # Nic heard on checks 2, 3, 4
+        self.assertEqual(len(calls), 2)            # failed on 3, retried on 4
+        self.assertEqual(len(self.client_sent), 1)
+
     def test_no_client_list_means_no_client_mail(self):
         del self.conf["CLIENT_ALERT_TO"]
         self.stale()
