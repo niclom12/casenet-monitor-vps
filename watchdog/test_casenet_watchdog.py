@@ -200,6 +200,78 @@ class Alerting(Base):
         self.assertIn(alertjson.BEGIN, rendered)
 
 
+class ClientMail(Alerting):
+    """The client list hears once per episode: >2 bad checks, grouped, then recovery."""
+
+    def setUp(self):
+        super().setUp()
+        self.client_sent = []
+        self.conf["CLIENT_ALERT_TO"] = "client@example.com"
+        self.conf["DOCKET_NAMES"] = "2622-CC00325:Case A,2622-CC00325-01:Case A settlement"
+
+    def client_mailer(self, subject, body):
+        self.client_sent.append((subject, body))
+
+    def run_once(self, now=NOW):
+        return w.run(self.conf, now=now, mailer=self.mailer, client_mailer=self.client_mailer)
+
+    def test_two_bad_checks_do_not_reach_the_client(self):
+        self.stale()
+        self.run_once()
+        self.run_once(NOW + 600)
+        self.assertEqual(self.client_sent, [])
+        self.assertEqual(len(self.sent), 1)    # Nic already hears
+
+    def test_third_bad_check_sends_one_grouped_email(self):
+        self.stale()
+        for i in range(6):
+            self.run_once(NOW + i * 600)
+        self.assertEqual(len(self.client_sent), 1)
+        subject, body = self.client_sent[0]
+        self.assertIn("2622-CC00325, 2622-CC00325-01", subject)
+        self.assertIn("Case A settlement", body)
+        self.assertIn("3 checks in a row", body)
+        self.assertNotIn("systemctl", body)   # no ops detail for the client
+
+    def test_a_further_docket_going_bad_sends_one_more(self):
+        self.put("main.txt", real_docket(), 200)
+        self.put("d01.txt", real_docket(), 10)
+        for i in range(3):
+            self.run_once(NOW + i * 600)
+        self.put("d01.txt", real_docket(), 200)
+        for i in range(3, 6):
+            self.run_once(NOW + i * 600)
+        self.assertEqual(len(self.client_sent), 2)
+        self.assertIn("2622-CC00325-01", self.client_sent[1][0])
+
+    def test_one_recovery_email_after_an_alert(self):
+        self.stale()
+        for i in range(3):
+            self.run_once(NOW + i * 600)
+        later = NOW + 3600
+        self.fresh(later)
+        self.run_once(later)
+        self.run_once(later + 600)
+        self.assertEqual([s for s, _ in self.client_sent].count(
+            "Case.net monitor: reading every docket again"), 1)
+        self.assertEqual(len(self.client_sent), 2)
+
+    def test_no_client_recovery_if_the_client_was_never_told(self):
+        self.stale()
+        self.run_once()
+        self.run_once(NOW + 600)               # Nic told, client not
+        self.fresh(NOW + 1200)
+        self.run_once(NOW + 1200)
+        self.assertEqual(self.client_sent, [])
+
+    def test_no_client_list_means_no_client_mail(self):
+        del self.conf["CLIENT_ALERT_TO"]
+        self.stale()
+        for i in range(5):
+            w.run(self.conf, now=NOW + i * 600, mailer=self.mailer)
+        self.assertEqual(len(self.sent), 4)
+
+
 class Recipients(unittest.TestCase):
     def test_default_recipient_is_nic_only(self):
         self.assertEqual(w.cfg_list({}, "ALERT_TO", "nic@atab.ai"), ["nic@atab.ai"])

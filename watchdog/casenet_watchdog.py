@@ -144,8 +144,9 @@ def with_always(conf, to_list):
     return out
 
 
-def send_mail(conf, to_list, subject, text, alert=None):
-    to_list = with_always(conf, to_list)
+def send_mail(conf, to_list, subject, text, alert=None, copy_data_layer=True):
+    if copy_data_layer:
+        to_list = with_always(conf, to_list)
     if not to_list:
         log("WARN: no recipients configured; skipping send")
         return False
@@ -294,12 +295,53 @@ def alert_body(state, results, consecutive, conf):
     return "\n".join(lines)
 
 
-def run(conf, now=None, mailer=None):
+def docket_names(conf):
+    """'LABEL:Name,LABEL:Name' -> {label: name}, for the client email only."""
+    return dict(parse_dockets(cfg(conf, "DOCKET_NAMES", "")))
+
+
+def client_alert_body(results, consecutive, conf):
+    """The client's copy: what is unread and what that means, no ops detail."""
+    now = datetime.now(SAST).strftime("%Y-%m-%d %H:%M SAST")
+    names = docket_names(conf)
+    lines = ["The Case.net monitor cannot read these dockets right now:", ""]
+    for label, ok, detail, _ in results:
+        if not ok:
+            name = names.get(label, "")
+            lines.append(f"  {label:<18} {name}".rstrip())
+            lines.append(f"  {'':<18} {CASE_URL.format(case=label)}")
+    lines += ["",
+              f"It has failed {consecutive} checks in a row (checked {now}).",
+              "New filings on these dockets may not reach you until reading resumes.",
+              "You will get one email when it does.",
+              "",
+              "Sent by casenet-watchdog on lacuna-ops."]
+    return "\n".join(lines)
+
+
+def client_recovery_body(results, conf):
+    names = docket_names(conf)
+    lines = ["The Case.net monitor is reading every docket again.", ""]
+    for label, _, detail, _ in results:
+        lines.append(f"  {label:<18} {names.get(label, '')}".rstrip())
+    lines += ["", "Sent by casenet-watchdog on lacuna-ops."]
+    return "\n".join(lines)
+
+
+def run(conf, now=None, mailer=None, client_mailer=None):
     now = int(now if now is not None else time.time())
     threshold = cfg_int(conf, "WATCHDOG_FAIL_THRESHOLD", 2)
     state_path = cfg(conf, "WATCHDOG_STATE_FILE", os.path.join(HERE, "state.json"))
     to = cfg_list(conf, "ALERT_TO", "nic@atab.ai")
     mail = mailer or (lambda subj, body, alert=None: send_mail(conf, to, subj, body, alert))
+    # The client's list (CLIENT_ALERT_TO, in .env only) is told once per episode:
+    # one grouped email when a docket has failed more than two checks in a row,
+    # another only if a further docket joins it, and one when all read again
+    # (Nic, 31 Oct 2026). No data-layer copy: Nic's stream already records it.
+    client = cfg_list(conf, "CLIENT_ALERT_TO", "")
+    client_threshold = cfg_int(conf, "CLIENT_FAIL_THRESHOLD", 3)
+    client_mail = client_mailer or (lambda subj, body: send_mail(
+        conf, client, subj, body, copy_data_layer=False))
 
     state, results = evaluate(conf, now)
     for label, ok, detail, _ in results:
@@ -319,13 +361,24 @@ def run(conf, now=None, mailer=None):
                   "headline": "The Case.net monitor is reading the docket again",
                   "ts": now, "tier": "immediate", "entity": "King v. Monsanto",
                   "detail": {"state": "OK"}})
-        st.update({"consecutive_bad": 0, "last_state": "OK", "alerted": False})
+        if client and st.get("client_bad"):
+            client_mail("Case.net monitor: reading every docket again",
+                        client_recovery_body(results, conf))
+        st.update({"consecutive_bad": 0, "last_state": "OK", "alerted": False,
+                   "client_bad": []})
         write_state(state_path, st)
         return 0
 
     st["consecutive_bad"] = int(st.get("consecutive_bad", 0)) + 1
     st["last_state"] = state
     consecutive = st["consecutive_bad"]
+
+    if client and consecutive >= client_threshold:
+        told = list(st.get("client_bad") or [])
+        if any(l not in told for l in bad_labels):
+            client_mail(f"Case.net monitor: not reading {', '.join(bad_labels)}",
+                        client_alert_body(results, consecutive, conf))
+            st["client_bad"] = told + [l for l in bad_labels if l not in told]
 
     # One bad check can be a file mid-write; two in a row is real.
     if consecutive < threshold:

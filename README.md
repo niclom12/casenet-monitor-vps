@@ -63,6 +63,14 @@ A failure email is sent only after `FAIL_ALERT_THRESHOLD` (default 2) consecutiv
 checks, and at most once per `FAIL_REALERT_HOURS` while still down. It auto-sends "recovered"
 when the docket is reachable again.
 
+The watchdog (`watchdog/`, a systemd timer every 10 min) has its own lists in its `.env`:
+- **`ALERT_TO`** → ops: one grouped email on every check while a docket is unread, then one
+  recovery.
+- **`CLIENT_ALERT_TO`** (optional) → the case people: one grouped email once a docket has
+  failed more than two checks in a row (`CLIENT_FAIL_THRESHOLD`, default 3), one more only
+  if another docket joins it, and one when every docket reads again. No ops detail in it.
+  `DOCKET_NAMES=LABEL:Name,...` puts case names next to the docket numbers.
+
 ## The two things that actually make or break it
 1. **Egress IP must be US.** CaseNet/Cloudflare blocks non-US and many datacenter IPs. The VPN
    provides US egress; the monitor's `VPN_CHECK` guard refuses to scrape otherwise (so it pauses
